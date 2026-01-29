@@ -16,8 +16,35 @@ class MCPRepository(BaseRepository):
     """Repository for MCP (Model Context Protocol) data operations"""
     
     def __init__(self):
-        super().__init__()
-        self.collection_name = "mcp_data"
+        from models.mcp_models import MCPServer
+        super().__init__("mcp_data", MCPServer)
+    
+    def _to_dict(self, obj: Any) -> Dict[str, Any]:
+        """Convert object to dictionary for Firestore storage"""
+        if hasattr(obj, 'dict'):
+            return obj.dict()
+        elif hasattr(obj, '__dict__'):
+            return obj.__dict__
+        else:
+            return {"data": str(obj)}
+    
+    def _from_dict(self, data: Dict[str, Any]) -> Any:
+        """Convert dictionary from Firestore to object"""
+        # For MCP models, we'll create a simple object from the data
+        from models.mcp_models import MCPServer
+        if 'name' in data and 'version' in data:
+            return MCPServer(**data)
+        else:
+            return data
+    
+    def _get_id(self, obj: Any) -> str:
+        """Get ID from object"""
+        if hasattr(obj, 'id'):
+            return obj.id
+        elif hasattr(obj, 'request_id'):
+            return obj.request_id
+        else:
+            return str(id(obj))
     
     async def save_server(self, server: MCPServer) -> str:
         """Save MCP server configuration"""

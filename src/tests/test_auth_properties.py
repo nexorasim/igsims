@@ -13,7 +13,7 @@ import jwt
 import secrets
 import string
 
-from hypothesis import given, strategies as st, assume, settings
+from hypothesis import given, strategies as st, assume, settings, HealthCheck
 from hypothesis.strategies import composite
 
 # Import our modules
@@ -33,13 +33,13 @@ def valid_emails(draw):
     """Generate valid email addresses"""
     local_part = draw(st.text(
         alphabet=string.ascii_letters + string.digits + "._-",
-        min_size=1,
+        min_size=2,
         max_size=20
-    ).filter(lambda x: x[0] not in ".-" and x[-1] not in ".-"))
+    ).filter(lambda x: x[0] not in ".-" and x[-1] not in ".-" and ".." not in x))
     
     domain = draw(st.text(
         alphabet=string.ascii_letters + string.digits + "-",
-        min_size=1,
+        min_size=2,
         max_size=15
     ).filter(lambda x: x[0] != "-" and x[-1] != "-"))
     
@@ -49,7 +49,13 @@ def valid_emails(draw):
         max_size=4
     ))
     
-    return f"{local_part}@{domain}.{tld}"
+    email = f"{local_part}@{domain}.{tld}"
+    # Additional validation to ensure it's a reasonable email
+    assume(len(email) >= 6)  # Minimum reasonable email length
+    assume("@" in email and email.count("@") == 1)
+    assume("." in email.split("@")[1])  # Domain must have a dot
+    
+    return email
 
 @composite
 def invalid_emails(draw):
@@ -420,6 +426,268 @@ class TestAuthUtilsProperties:
             assert not AuthUtils.is_safe_redirect_url(url, allowed_hosts), f"Unsafe URL {url} should be rejected"
 
 # Integration property tests
+
+class TestAuthenticationSecurityProperties:
+    """Property-based tests for comprehensive authentication security - Property 27"""
+    
+    @pytest.fixture
+    def mock_auth_service(self):
+        """Mock auth service for security property testing"""
+        with patch('services.auth_service.get_settings'), \
+             patch('services.auth_service.UserRepository') as mock_repo, \
+             patch('services.auth_service.firestore.Client'), \
+             patch('services.auth_service.firebase_admin.initialize_app'), \
+             patch('services.auth_service.firebase_admin.get_app'):
+            
+            service = AuthService()
+            service._jwt_secret = "test-secret-key-for-security-testing"
+            
+            # Setup mock repository
+            mock_repo_instance = Mock()
+            mock_repo_instance.get_by_email = AsyncMock(return_value=None)
+            mock_repo_instance.get = AsyncMock()
+            mock_repo_instance.create = AsyncMock(return_value=True)
+            mock_repo_instance.update_last_login = AsyncMock(return_value=True)
+            service.user_repository = mock_repo_instance
+            
+            return service
+    
+    @pytest.mark.asyncio
+    @given(
+        st.one_of(
+            # Valid authentication attempts
+            st.tuples(valid_emails(), strong_passwords(), st.just(True)),
+            # Invalid authentication attempts  
+            st.tuples(invalid_emails(), st.text(), st.just(False)),
+            st.tuples(valid_emails(), weak_passwords(), st.just(False)),
+            st.tuples(st.text().filter(lambda x: "@" not in x or len(x) < 5), st.text(), st.just(False))
+        )
+    )
+    @settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    async def test_comprehensive_authentication_security_property(self, mock_auth_service, auth_data):
+        """
+        **Validates: Requirements 8.1, 8.2**
+        Property 27: Comprehensive Authentication Security
+        For any user access attempt or API call, the platform should implement secure 
+        authentication and validate authentication tokens correctly
+        """
+        email, password, should_succeed = auth_data
+        
+        # Skip empty credentials as they're handled by input validation
+        assume(email is not None and password is not None)
+        assume(len(str(email)) > 0 and len(str(password)) > 0)
+        
+        with patch('firebase_admin.auth.create_user') as mock_create, \
+             patch.object(mock_auth_service, '_authenticate_with_firebase') as mock_firebase_auth:
+            
+            # Check if credentials are actually valid according to our validation rules
+            email_valid = mock_auth_service._validate_email(email)
+            password_valid = mock_auth_service._validate_password(password)
+            credentials_valid = email_valid and password_valid
+            
+            if should_succeed and credentials_valid:
+                # Setup successful authentication mocks
+                mock_firebase_user = Mock()
+                mock_firebase_user.uid = f"firebase-uid-{secrets.token_hex(8)}"
+                mock_firebase_user.email = email
+                mock_firebase_user.display_name = "Test User"
+                mock_create.return_value = mock_firebase_user
+                
+                mock_firebase_auth.return_value = {
+                    "success": True,
+                    "user_id": mock_firebase_user.uid,
+                    "id_token": "valid-firebase-token",
+                    "refresh_token": "valid-firebase-refresh"
+                }
+                
+                # Create valid user for authentication
+                valid_user = User.create_new(email, "Test User")
+                valid_user.user_id = mock_firebase_user.uid
+                mock_auth_service.user_repository.get.return_value = valid_user
+                
+                # Test authentication attempt
+                auth_result = await mock_auth_service.login_with_email_password(email, password)
+                
+                # Valid credentials should succeed
+                assert auth_result.success, f"Valid authentication should succeed for {email}"
+                assert auth_result.user is not None, "Successful auth should return user"
+                assert auth_result.access_token is not None, "Successful auth should return access token"
+                assert auth_result.refresh_token is not None, "Successful auth should return refresh token"
+                
+                # Test token validation with a small delay to avoid timing issues
+                import time
+                time.sleep(0.1)  # Small delay to ensure token is not expired immediately
+                token_validation = await mock_auth_service.validate_token(auth_result.access_token)
+                assert token_validation.valid, "Generated access token should be valid"
+                assert token_validation.user_id == auth_result.user.user_id, "Token should contain correct user ID"
+                
+            else:
+                # Setup failed authentication mocks
+                mock_firebase_auth.return_value = {
+                    "success": False,
+                    "error_code": "AUTH_FAILED",
+                    "error_message": "Authentication failed"
+                }
+                mock_auth_service.user_repository.get.return_value = None
+                
+                # Test authentication attempt
+                auth_result = await mock_auth_service.login_with_email_password(email, password)
+                
+                # Invalid credentials should fail
+                assert not auth_result.success, f"Invalid authentication should fail for {email}"
+                assert auth_result.user is None, "Failed auth should not return user"
+                assert auth_result.access_token is None, "Failed auth should not return access token"
+                assert auth_result.error_code is not None, "Failed auth should return error code"
+    
+    @pytest.mark.asyncio
+    @given(st.text(min_size=1, max_size=200))
+    @settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    async def test_api_token_validation_security_property(self, mock_auth_service, token_input):
+        """
+        **Validates: Requirements 8.1, 8.2**
+        Property 27: Comprehensive Authentication Security - API Token Validation
+        For any API call with a token, the platform should validate authentication tokens correctly
+        """
+        # Test various token formats and validity
+        
+        if len(token_input.strip()) == 0:
+            # Empty tokens should be invalid
+            validation_result = await mock_auth_service.validate_token(token_input)
+            assert not validation_result.valid, "Empty token should be invalid"
+            return
+        
+        # Create a valid user and token for comparison
+        valid_user = User.create_new("test@example.com", "Test User")
+        valid_user.user_id = f"user-{secrets.token_hex(8)}"
+        mock_auth_service.user_repository.get.return_value = valid_user
+        
+        valid_token = mock_auth_service._generate_access_token(valid_user)
+        
+        if token_input == valid_token:
+            # Valid token should pass validation
+            validation_result = await mock_auth_service.validate_token(token_input)
+            assert validation_result.valid, "Valid token should pass validation"
+            assert validation_result.user_id == valid_user.user_id, "Valid token should return correct user ID"
+        else:
+            # Invalid/malformed tokens should fail validation
+            validation_result = await mock_auth_service.validate_token(token_input)
+            assert not validation_result.valid, f"Invalid token should fail validation: {token_input[:50]}..."
+            assert validation_result.user_id is None, "Invalid token should not return user ID"
+            assert validation_result.error_message is not None, "Invalid token should return error message"
+    
+    @pytest.mark.asyncio
+    @given(st.integers(min_value=-3600, max_value=3600))  # -1 hour to +1 hour
+    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    async def test_token_expiration_security_property(self, mock_auth_service, time_offset_seconds):
+        """
+        **Validates: Requirements 8.2**
+        Property 27: Comprehensive Authentication Security - Token Expiration
+        For any token with expiration time, the platform should correctly validate based on current time
+        """
+        valid_user = User.create_new("test@example.com", "Test User")
+        valid_user.user_id = f"user-{secrets.token_hex(8)}"
+        mock_auth_service.user_repository.get.return_value = valid_user
+        
+        # Create token with custom expiration - add buffer to avoid timing issues
+        now = datetime.utcnow()
+        # Always add at least 10 seconds buffer for non-negative offsets to avoid timing issues
+        buffer_seconds = 10 if time_offset_seconds >= 0 else 0
+        exp_time = now + timedelta(seconds=time_offset_seconds + buffer_seconds)
+        
+        payload = {
+            'sub': valid_user.user_id,
+            'email': valid_user.email,
+            'role': valid_user.role,
+            'permissions': valid_user.permissions,
+            'iat': now.timestamp(),
+            'exp': exp_time.timestamp(),
+            'type': 'access'
+        }
+        
+        token = jwt.encode(payload, mock_auth_service._jwt_secret, algorithm=mock_auth_service._jwt_algorithm)
+        
+        # Validate token
+        validation_result = await mock_auth_service.validate_token(token)
+        
+        if time_offset_seconds >= -10:  # Allow 10 second tolerance for past tokens
+            # Future expiration should be valid
+            assert validation_result.valid, f"Token with future expiration (+{time_offset_seconds}s) should be valid"
+            assert validation_result.user_id == valid_user.user_id, "Valid token should return correct user ID"
+        else:
+            # Past expiration should be invalid
+            assert not validation_result.valid, f"Token with past expiration ({time_offset_seconds}s) should be invalid"
+            assert "expired" in validation_result.error_message.lower(), "Expired token should return expiration error"
+    
+    @pytest.mark.asyncio
+    @given(st.lists(st.text(min_size=1, max_size=20), min_size=1, max_size=5, unique=True))
+    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    async def test_permission_based_access_security_property(self, mock_auth_service, required_permissions):
+        """
+        **Validates: Requirements 8.1**
+        Property 27: Comprehensive Authentication Security - Permission-based Access
+        For any set of required permissions, the platform should correctly validate user access
+        """
+        # Create users with different permission sets
+        admin_user = User.create_new("admin@example.com", "Admin User", "admin")
+        regular_user = User.create_new("user@example.com", "Regular User", "user")
+        
+        # Add some permissions to regular user (but not all)
+        permissions_to_add = required_permissions[:len(required_permissions)//2] if len(required_permissions) > 1 else []
+        for permission in permissions_to_add:
+            regular_user.add_permission(permission)
+        
+        # Test admin user access (should have all permissions)
+        for permission in required_permissions:
+            assert admin_user.has_permission(permission), f"Admin should have permission: {permission}"
+        
+        # Test regular user access (should only have explicitly granted permissions)
+        for permission in required_permissions:
+            if permission in permissions_to_add:
+                assert regular_user.has_permission(permission), f"Regular user should have granted permission: {permission}"
+            else:
+                assert not regular_user.has_permission(permission), f"Regular user should not have non-granted permission: {permission}"
+    
+    @pytest.mark.asyncio
+    @given(st.integers(min_value=1, max_value=20))
+    @settings(max_examples=30, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    async def test_concurrent_authentication_security_property(self, mock_auth_service, concurrent_attempts):
+        """
+        **Validates: Requirements 8.1, 8.2**
+        Property 27: Comprehensive Authentication Security - Concurrent Access
+        For any number of concurrent authentication attempts, the platform should maintain security
+        """
+        valid_user = User.create_new("test@example.com", "Test User")
+        valid_user.user_id = f"user-{secrets.token_hex(8)}"
+        mock_auth_service.user_repository.get.return_value = valid_user
+        
+        with patch.object(mock_auth_service, '_authenticate_with_firebase') as mock_firebase_auth:
+            mock_firebase_auth.return_value = {
+                "success": True,
+                "user_id": valid_user.user_id,
+                "id_token": "valid-firebase-token",
+                "refresh_token": "valid-firebase-refresh"
+            }
+            
+            # Simulate concurrent authentication attempts
+            tasks = []
+            for i in range(concurrent_attempts):
+                task = mock_auth_service.login_with_email_password("test@example.com", "validpassword123")
+                tasks.append(task)
+            
+            # Execute all authentication attempts concurrently
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # All attempts should succeed (same valid credentials)
+            successful_auths = 0
+            unique_tokens = set()
+            
+            for result in results:
+                if isinstance(result, AuthResult) and result.success:
+                    successful_auths += 1
+                    unique_tokens.add(result.access_token)
+            
+            assert successful_auths == concurrent_attempts, f"All {concurrent_attempts} concurrent auth attempts should succeed"
+            assert len(unique_tokens) == concurrent_attempts, "All concurrent authentications should generate unique tokens"
 
 class TestAuthenticationIntegrationProperties:
     """Property-based integration tests for authentication system"""

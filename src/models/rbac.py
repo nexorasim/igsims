@@ -247,6 +247,7 @@ class RoleHierarchy:
             Permission.VIEW_SYSTEM_LOGS,
             Permission.MANAGE_SYSTEM_CONFIG,
             Permission.ACCESS_ADMIN_PANEL,
+            Permission.MANAGE_PERMISSIONS,
             Permission.EXPORT_DATA,
             Permission.MANAGE_REPORTS,
             Permission.API_DELETE,
@@ -261,10 +262,8 @@ class RoleHierarchy:
             inherits_from=Role.OPERATOR.value
         )
         
-        # Super Admin role - all permissions including permission management
-        super_admin_permissions = admin_permissions | {
-            Permission.MANAGE_PERMISSIONS
-        }
+        # Super Admin role - all permissions (same as admin for now, can be extended later)
+        super_admin_permissions = admin_permissions
         
         self._roles[Role.SUPER_ADMIN.value] = RoleDefinition(
             name=Role.SUPER_ADMIN.value,

@@ -1,10 +1,14 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import Dict, Any, Optional, List
 import asyncio
 import logging
 import os
+import ssl
+import uvicorn
 
 from .auth import FirebaseAuth, require_auth, require_role
 from .mcp_server import MCPServer
@@ -12,20 +16,73 @@ from .esim_agent import DeviceManager, eSIMProvisioner, DeviceAuthenticator
 from .m2m_service import M2MDeviceManager, M2MMessageRouter
 from .models.mcp_models import MCPRequest, MCPResponse
 from .repositories import DeviceRepository, eSIMRepository
+from ..config.settings import get_settings
+from ..utils.secure_api_manager import get_secret_manager
+
+# Initialize settings
+settings = get_settings()
+secret_manager = get_secret_manager()
 
 app = FastAPI(
     title="iGSIM AI Agent API",
     description="Comprehensive AI Agent platform with eSIM AI Agent M2M and Smart Website services",
-    version="1.0.0"
+    version="1.0.0",
+    docs_url="/docs" if settings.debug else None,
+    redoc_url="/redoc" if settings.debug else None
 )
+
+# Security middleware
+security = HTTPBearer()
+
+# Add trusted host middleware for production
+if settings.is_production():
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=["bamboo-reason-483913-i4.web.app", "localhost", "127.0.0.1"]
+    )
+
+# CORS middleware with security considerations
+cors_origins = ["https://bamboo-reason-483913-i4.web.app"]
+if settings.debug:
+    cors_origins.extend(["http://localhost:3000", "http://localhost:8000"])
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID"]
 )
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Add security headers to all responses"""
+    response = await call_next(request)
+    
+    # Add security headers
+    security_headers = settings.get_security_headers()
+    for header, value in security_headers.items():
+        response.headers[header] = value
+    
+    # Add request ID for tracking
+    import uuid
+    response.headers["X-Request-ID"] = str(uuid.uuid4())
+    
+    return response
+
+@app.middleware("http")
+async def enforce_https(request: Request, call_next):
+    """Enforce HTTPS in production"""
+    if settings.security.enforce_https and settings.is_production():
+        if request.url.scheme != "https":
+            https_url = request.url.replace(scheme="https")
+            return Response(
+                status_code=301,
+                headers={"Location": str(https_url)}
+            )
+    
+    return await call_next(request)
 
 # Initialize services
 mcp_server = MCPServer()
@@ -66,7 +123,9 @@ async def health_check():
         "services": {
             "ai_services": ai_health,
             "database": "connected",
-            "authentication": "active"
+            "authentication": "active",
+            "encryption": "enabled" if settings.encryption.data_encryption_enabled else "disabled",
+            "tls": "enabled" if settings.tls.enabled else "disabled"
         }
     }
 
@@ -230,6 +289,49 @@ async def get_all_users(user: dict = Depends(require_auth)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+def create_ssl_context():
+    """Create SSL context for HTTPS"""
+    if not settings.tls.enabled:
+        return None
+    
+    context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    
+    # Set minimum TLS version
+    if settings.tls.min_version == "TLSv1.2":
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+    elif settings.tls.min_version == "TLSv1.3":
+        context.minimum_version = ssl.TLSVersion.TLSv1_3
+    
+    # Set maximum TLS version
+    if settings.tls.max_version == "TLSv1.2":
+        context.maximum_version = ssl.TLSVersion.TLSv1_2
+    elif settings.tls.max_version == "TLSv1.3":
+        context.maximum_version = ssl.TLSVersion.TLSv1_3
+    
+    # Load certificates if provided
+    if settings.tls.cert_file and settings.tls.key_file:
+        context.load_cert_chain(settings.tls.cert_file, settings.tls.key_file)
+    
+    # Set cipher suites if specified
+    if settings.tls.ciphers:
+        context.set_ciphers(settings.tls.ciphers)
+    
+    return context
+
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    ssl_context = create_ssl_context()
+    
+    uvicorn_config = {
+        "app": app,
+        "host": "0.0.0.0",
+        "port": 8000 if not settings.tls.enabled else 8443,
+        "log_level": settings.log_level.lower(),
+        "access_log": True,
+        "server_header": False,  # Hide server header for security
+        "date_header": False     # Hide date header for security
+    }
+    
+    if ssl_context:
+        uvicorn_config["ssl_context"] = ssl_context
+    
+    uvicorn.run(**uvicorn_config)

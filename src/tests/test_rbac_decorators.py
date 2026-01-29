@@ -346,7 +346,7 @@ class TestRBACMiddleware:
         middleware.auth_service.get_user_by_token = AsyncMock(return_value=user)
         mock_request.headers = {"Authorization": "Bearer valid_token"}
         
-        response = await middleware(request, mock_call_next)
+        response = await middleware(mock_request, mock_call_next)
         assert response.status_code == 200
         assert mock_request.state.current_user == user
     
