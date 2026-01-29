@@ -1,0 +1,64 @@
+{
+  "name": "igsim-ai-agent-platform",
+  "version": "1.0.0",
+  "description": "iGSIM AI Agent powered by eSIM Myanmar - Comprehensive AI Agent platform",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "export": "next export",
+    "deploy": "npm run build && firebase deploy --only hosting && git add . && git commit -m \"Deploy to Firebase\" && git push origin main",
+    "deploy:full": "npm run build && firebase deploy",
+    "serve": "firebase serve --only hosting",
+    "python:gui": "cd src && python main.py --gui",
+    "python:web": "cd src && python main.py --web",
+    "python:console": "cd src && python main.py --console",
+    "install:python": "pip install -r requirements.txt",
+    "setup": "npm install && npm run install:python"
+  },
+  "dependencies": {
+    "next": "^14.0.0",
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0",
+    "tailwindcss": "^3.4.0",
+    "autoprefixer": "^10.4.0",
+    "postcss": "^8.4.0",
+    "@headlessui/react": "^1.7.0",
+    "@heroicons/react": "^2.0.0",
+    "firebase": "^10.7.0",
+    "axios": "^1.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
+    "eslint": "^8.0.0",
+    "eslint-config-next": "^14.0.0",
+    "typescript": "^5.0.0"
+  },
+  "keywords": [
+    "iGSIM",
+    "AI Agent",
+    "eSIM",
+    "Myanmar",
+    "M2M",
+    "Firebase",
+    "Next.js",
+    "Tailwind CSS",
+    "Python",
+    "PyQt",
+    "PySide"
+  ],
+  "author": "iGSIM AI Agent powered by eSIM Myanmar",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nexorasim/igsims.git"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
+}
